@@ -1,0 +1,41 @@
+name: Morning Report
+
+on:
+  schedule:
+    # Daily 8 AM PDT (15:00 UTC) — runs during the season Apr–Oct
+    - cron: '0 15 * * *'
+    # Mid-week wire check: Wednesday 8 AM PDT
+    # (covered by the daily cron above — separate job below for clarity)
+    # Sunday 9 PM PDT (04:00 UTC Monday) — weekly sweep
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Date to run for (YYYY-MM-DD). Leave blank for today.'
+        required: false
+
+jobs:
+  morning-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pandas requests
+
+      - name: Run morning report
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            python morning_report.py "${{ github.event.inputs.date }}"
+          else
+            python morning_report.py
+          fi
