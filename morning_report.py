@@ -496,7 +496,8 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
 
     scoring_legend = (
         "*IP×+3  K×+1  ER×-2  H×-1  BB×-1  W×+2  L×-2*  🟢≥14  🟡9-13  🔴<9\n"
-        "*PARK/OPP: COO=Coors  ++=strong(1.08+)  +=mild(1.03+)  --=weak(≤0.93)  -=mild(≤0.97)*"
+        "*PARK (home stadium): COO=Coors  ++=hitter-friendly  +=mild hitter  --=pitcher-friendly  -=mild pitcher*\n"
+        "*OPP (lineup vs pitcher): ++=tough offense  +=above avg  --=weak offense  -=below avg  (++ hurts pitcher)*"
     )
 
     def fmt(v, d=2):
