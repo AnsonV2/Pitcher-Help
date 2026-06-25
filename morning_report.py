@@ -149,6 +149,39 @@ def get_team_win_pcts(season=2025, team_abbrevs=None):
     return result
 
 
+def get_team_batting_stats(season=2025, team_abbrevs=None):
+    """
+    Returns dict team_abbrev → opp_factor (float, centered on 1.0).
+    Factor = team runs/game ÷ league-average runs/game.
+    Values > 1.0 mean a stronger offense (harder matchup); < 1.0 = weaker offense.
+    Apply to the opponent's abbreviation when projecting a pitcher's start.
+    """
+    r = requests.get(
+        'https://statsapi.mlb.com/api/v1/teams/stats',
+        params={'stats': 'season', 'group': 'hitting', 'season': season, 'sportId': 1},
+        timeout=10,
+    )
+    r.raise_for_status()
+
+    splits = r.json().get('stats', [{}])[0].get('splits', [])
+    team_rpg = {}
+    for split in splits:
+        team_id = split.get('team', {}).get('id')
+        abbrev  = (team_abbrevs or {}).get(team_id)
+        if not abbrev:
+            continue
+        stat   = split.get('stat', {})
+        runs   = float(stat.get('runs', 0) or 0)
+        games  = float(stat.get('gamesPlayed', 1) or 1)
+        team_rpg[abbrev] = runs / games
+
+    if not team_rpg:
+        return {}
+
+    league_avg = sum(team_rpg.values()) / len(team_rpg)
+    return {abbrev: round(rpg / league_avg, 3) for abbrev, rpg in team_rpg.items()}
+
+
 def get_probables(game_date=None, team_abbrevs=None):
     if game_date is None:
         game_date = date.today().strftime('%Y-%m-%d')
@@ -313,7 +346,7 @@ def get_il_pitchers(days_back=60):
 
 # -- Scoring projection -------------------------------------------------------
 
-def project_start(row, park_factor=1.0, win_pct=0.500):
+def project_start(row, park_factor=1.0, win_pct=0.500, opp_factor=1.0):
     ip_total = float(row.get('IP', 0) or 0)
     gs       = max(int(row.get('GS', 1) or 1), 1)
     ip_start = min(ip_total / gs, 7.0)
@@ -329,15 +362,19 @@ def project_start(row, park_factor=1.0, win_pct=0.500):
     w_prob = WIN_PROB  * (win_pct / 0.500)
     l_prob = LOSS_PROB * ((1.0 - win_pct) / 0.500)
 
-    # Park factor scales ER and H — the two biggest point-swing stats (-2 and -1).
+    # Combined environment: park factor × opponent offense factor.
+    # Both scale ER and H rates — the two biggest point-swing stats (-2 and -1).
+    # e.g. Coors (1.16) × Yankees lineup (1.20) = 1.39 combined pressure.
+    env = park_factor * opp_factor
+
     return round(
-        ip_start                            * SCORING['IP'] +
-        rate('SO') * ip_start               * SCORING['SO'] +
-        rate('H')  * ip_start * park_factor * SCORING['H']  +
-        rate('BB') * ip_start               * SCORING['BB'] +
-        rate('ER') * ip_start * park_factor * SCORING['ER'] +
-        w_prob                              * SCORING['W']   +
-        l_prob                              * SCORING['L'],
+        ip_start                    * SCORING['IP'] +
+        rate('SO') * ip_start       * SCORING['SO'] +
+        rate('H')  * ip_start * env * SCORING['H']  +
+        rate('BB') * ip_start       * SCORING['BB'] +
+        rate('ER') * ip_start * env * SCORING['ER'] +
+        w_prob                      * SCORING['W']   +
+        l_prob                      * SCORING['L'],
         1
     )
 
@@ -411,8 +448,19 @@ def _closer_section(all_stats, fa_names, win_pcts=None):
     return f"\n**WIRE CLOSERS — ADD IMMEDIATELY**\n```\n{lines}```"
 
 
+def opp_label(of):
+    """3-char label for opponent offense strength relative to league average."""
+    if of >= 1.15: return "+++"
+    if of >= 1.08: return " ++"
+    if of >= 1.03: return "  +"
+    if of <= 0.87: return "---"
+    if of <= 0.93: return " --"
+    if of <= 0.97: return "  -"
+    return "   "
+
+
 def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=None, fa_names=None,
-                   draft_date=None, all_stats=None, il_data=None, win_pcts=None):
+                   draft_date=None, all_stats=None, il_data=None, win_pcts=None, opp_factors=None):
     """
     Returns a list of message strings, each under 1900 chars.
 
@@ -437,16 +485,18 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
 
     df = df.copy()
     df['park_factor'] = df.apply(get_park_factor, axis=1)
-    df['win_pct'] = df['team'].map(lambda t: (win_pcts or {}).get(t, 0.500))
+    df['win_pct']     = df['team'].map(lambda t: (win_pcts or {}).get(t, 0.500))
+    df['opp_factor']  = df['opponent'].map(lambda t: (opp_factors or {}).get(t, 1.0))
     has_stats = df['IP'].notna()
     df.loc[has_stats, 'proj_pts'] = df[has_stats].apply(
-        lambda r: project_start(r, park_factor=r['park_factor'], win_pct=r['win_pct']), axis=1
+        lambda r: project_start(r, park_factor=r['park_factor'],
+                                win_pct=r['win_pct'], opp_factor=r['opp_factor']), axis=1
     )
     df = df.sort_values('proj_pts', ascending=False, na_position='last')
 
     scoring_legend = (
         "*IP×+3  K×+1  ER×-2  H×-1  BB×-1  W×+2  L×-2*  🟢≥14  🟡9-13  🔴<9\n"
-        "*PARK: COO=Coors  ++=hitter(1.04+)  +=mild hitter  --=pitcher(≤0.95)  -=mild pitcher*"
+        "*PARK/OPP: COO=Coors  ++=strong(1.08+)  +=mild(1.03+)  --=weak(≤0.93)  -=mild(≤0.97)*"
     )
 
     def fmt(v, d=2):
@@ -467,19 +517,20 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
             flag = "BUY" if diff > 0.75 else "SEL" if diff < -0.75 else "   "
         else:
             flag = "   "
-        park    = park_label(row.get('park_factor', 1.0))
+        park     = park_label(row.get('park_factor', 1.0))
+        opp      = opp_label(row.get('opp_factor', 1.0))
         win_pct_val = row.get('win_pct', 0.500)
         wpct_str = f"{win_pct_val:.3f}" if pd.notna(win_pct_val) else ".500"
         return (
             f"{icon}{row['name']:<21} {matchup:<13} "
             f"{proj_str:>6}  {fmt(row.get('ERA')):>4}  "
             f"{fmt(row.get('FIP')):>4}  {fmt(row.get('xERA')):>4}  "
-            f"{fmt(row.get('K%'), 1):>5}  {wpct_str}  {flag} {park}\n"
+            f"{fmt(row.get('K%'), 1):>5}  {wpct_str}  {flag} {park} {opp}\n"
         )
 
     col_header = (
-        f"{'PITCHER':<22} {'MATCHUP':<13} {'PROJ':>6}  {'ERA':>4}  {'FIP':>4}  {'xERA':>4}  {'K%':>5}    W%  FLAG PARK\n"
-        f"{'-'*22} {'-'*13} {'-'*6}  {'-'*4}  {'-'*4}  {'-'*4}  {'-'*5}  ----  ---- ----\n"
+        f"{'PITCHER':<22} {'MATCHUP':<13} {'PROJ':>6}  {'ERA':>4}  {'FIP':>4}  {'xERA':>4}  {'K%':>5}    W%  FLAG PARK OPP\n"
+        f"{'-'*22} {'-'*13} {'-'*6}  {'-'*4}  {'-'*4}  {'-'*4}  {'-'*5}  ----  ---- ---- ---\n"
     )
 
     # ── Phase 2 sectioned layout ──────────────────────────────────────────────
@@ -637,12 +688,20 @@ if __name__ == '__main__':
         print(f"  WARNING: Standings fetch failed ({e}) — using flat win probability.")
         win_pcts = {}
 
+    print("Pulling team batting stats (opponent quality)...")
+    try:
+        opp_factors = get_team_batting_stats(season=season, team_abbrevs=team_abbrevs)
+        print(f"  Got offense ratings for {len(opp_factors)} teams.")
+    except Exception as e:
+        print(f"  WARNING: Team batting stats fetch failed ({e}) — using neutral opponent quality.")
+        opp_factors = {}
+
     webhook = os.environ.get('DISCORD_WEBHOOK_URL')
     draft_date = os.environ.get('DRAFT_DATE')
     msgs = format_discord(merged, game_date, my_names=my_names, opp_names=opp_names,
                           my_all=my_all, fa_names=fa_names,
                           draft_date=draft_date, all_stats=stats, il_data=il_data,
-                          win_pcts=win_pcts)
+                          win_pcts=win_pcts, opp_factors=opp_factors)
 
     if not webhook:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
