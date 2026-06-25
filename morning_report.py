@@ -69,7 +69,7 @@ def get_season_stats(season=2025, min_ip=20.0):
 
         ip = float(stat.get('inningsPitched', 0) or 0)
         gs = int(stat.get('gamesStarted', 0) or 0)
-        if ip < min_ip or gs == 0:
+        if ip < min_ip:
             continue
 
         so = int(stat.get('strikeOuts', 0) or 0)
@@ -79,16 +79,19 @@ def get_season_stats(season=2025, min_ip=20.0):
         hr = int(stat.get('homeRuns', 0) or 0)
         w  = int(stat.get('wins', 0) or 0)
         l  = int(stat.get('losses', 0) or 0)
+        sv = int(stat.get('saves', 0) or 0)
 
         fip = round((13 * hr + 3 * bb - 2 * so) / ip + FIP_CONSTANT, 2) if ip > 0 else None
+        k9  = round((so / ip) * 9, 1) if ip > 0 else None
+        bb9 = round((bb / ip) * 9, 1) if ip > 0 else None
 
         rows.append({
             'name': person.get('fullName'), 'mlbam_id': person.get('id'),
             'GS': gs, 'IP': ip, 'SO': so, 'BB': bb,
-            'H': h, 'ER': er, 'HR': hr, 'W': w, 'L': l,
+            'H': h, 'ER': er, 'HR': hr, 'W': w, 'L': l, 'SV': sv,
             'ERA': float(stat.get('era', 0) or 0),
             'WHIP': float(stat.get('whip', 0) or 0),
-            'FIP': fip,
+            'FIP': fip, 'K9': k9, 'BB9': bb9,
         })
 
     return pd.DataFrame(rows)
@@ -255,7 +258,30 @@ def project_start(row):
 
 # -- Discord formatting -------------------------------------------------------
 
-def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=None, fa_names=None):
+def _closer_section(all_stats, fa_names):
+    """Returns a formatted string for wire closers meeting quality thresholds."""
+    if all_stats is None or not fa_names:
+        return ""
+    tmp = all_stats.copy()
+    tmp['_norm'] = tmp['name'].apply(_normalize)
+    closers = tmp[
+        tmp['_norm'].isin(fa_names) &
+        (tmp['GS'] == 0) &
+        (tmp['SV'] >= 8) &
+        (tmp['ERA'] <= 3.50) &
+        (tmp['FIP'] <= 3.50)
+    ].sort_values('SV', ascending=False)
+    if closers.empty:
+        return ""
+    lines = "".join(
+        f"🔒 {r['name']:<23} SV:{int(r['SV']):>2}  ERA:{r['ERA']:.2f}  FIP:{r['FIP']:.2f}\n"
+        for _, r in closers.iterrows()
+    )
+    return f"\n**WIRE CLOSERS — ADD IMMEDIATELY**\n```\n{lines}```"
+
+
+def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=None, fa_names=None,
+                   draft_date=None, all_stats=None):
     """
     Returns a list of message strings, each under 1900 chars.
 
@@ -265,6 +291,18 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
     When omitted: falls back to a single sorted list of all starters.
     """
     label = date.today().strftime('%A %b %d') if not game_date else game_date
+
+    countdown = ""
+    if draft_date:
+        try:
+            draft_dt = date.fromisoformat(draft_date)
+            days_left = (draft_dt - date.today()).days
+            if days_left > 0:
+                countdown = f" | Draft in {days_left} days"
+            elif days_left == 0:
+                countdown = " | Draft Day!"
+        except Exception:
+            pass
 
     df = df.copy()
     has_stats = df['IP'].notna()
@@ -284,15 +322,23 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
                     "🟡" if pd.notna(proj) and proj >= 9  else
                     "🔴" if pd.notna(proj)                else "⬜")
         proj_str = f"+{fmt(proj,1)}" if pd.notna(proj) else "   --"
+        era = row.get('ERA')
+        fip = row.get('FIP')
+        if pd.notna(era) and pd.notna(fip):
+            diff = era - fip
+            flag = "BUY" if diff > 0.75 else "SEL" if diff < -0.75 else "   "
+        else:
+            flag = "   "
         return (
             f"{icon}{row['name']:<21} {matchup:<13} "
             f"{proj_str:>6}  {fmt(row.get('ERA')):>4}  "
-            f"{fmt(row.get('FIP')):>4}  {fmt(row.get('xERA')):>4}\n"
+            f"{fmt(row.get('FIP')):>4}  {fmt(row.get('xERA')):>4}  "
+            f"{fmt(row.get('K9'), 1):>4}  {flag}\n"
         )
 
     col_header = (
-        f"{'PITCHER':<22} {'MATCHUP':<13} {'PROJ':>6}  {'ERA':>4}  {'FIP':>4}  {'xERA':>4}\n"
-        f"{'-'*22} {'-'*13} {'-'*6}  {'-'*4}  {'-'*4}  {'-'*4}\n"
+        f"{'PITCHER':<22} {'MATCHUP':<13} {'PROJ':>6}  {'ERA':>4}  {'FIP':>4}  {'xERA':>4}  {'K/9':>4}  FLAG\n"
+        f"{'-'*22} {'-'*13} {'-'*6}  {'-'*4}  {'-'*4}  {'-'*4}  {'-'*4}  ----\n"
     )
 
     # ── Phase 2 sectioned layout ──────────────────────────────────────────────
@@ -327,11 +373,12 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
             body = "".join(row_line(r) for _, r in rows_df.iterrows())
             return f"\n**{header}**\n```\n{col_header}{body}```"
 
-        header = f"⚾ **The Yastrzemski Legacy** — {label}{no_start_line}"
+        header = f"⚾ **The Yastrzemski Legacy** — {label}{countdown}{no_start_line}"
         body   = (
             section("YOUR STARTERS TODAY", mine_df) +
             section("OPPONENT'S STARTERS TODAY", opp_df) +
             section("WIRE PICKUPS — STARTING TODAY", wire_df) +
+            _closer_section(all_stats, fa_names) +
             f"\n{scoring_legend}" +
             no_data_warn
         )
@@ -354,7 +401,7 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
     # ── Phase 1 fallback: single sorted list ──────────────────────────────────
     no_data = df[df['IP'].isna()]['name'].tolist()
     warn    = f"\n⚠ No season data (rookie/call-up): {', '.join(no_data)}" if no_data else ""
-    title   = f"⚾ **The Yastrzemski Legacy** — {label}\n```\n{col_header}"
+    title   = f"⚾ **The Yastrzemski Legacy** — {label}{countdown}\n```\n{col_header}"
     footer  = f"```\n{scoring_legend}"
 
     lines = [row_line(r) for _, r in df.iterrows()]
@@ -429,7 +476,10 @@ if __name__ == '__main__':
         print("ESPN env vars not set — using Phase 1 format (all starters, no roster split).")
 
     webhook = os.environ.get('DISCORD_WEBHOOK_URL')
-    msgs = format_discord(merged, game_date, my_names=my_names, opp_names=opp_names, my_all=my_all, fa_names=fa_names)
+    draft_date = os.environ.get('DRAFT_DATE')
+    msgs = format_discord(merged, game_date, my_names=my_names, opp_names=opp_names,
+                          my_all=my_all, fa_names=fa_names,
+                          draft_date=draft_date, all_stats=stats)
 
     if not webhook:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
