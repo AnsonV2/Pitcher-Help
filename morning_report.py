@@ -236,6 +236,58 @@ def get_espn_data(league_id, espn_s2, swid, team_id, season=2025):
         return set(), set(), [], set()
 
 
+# -- Injury / IL data ---------------------------------------------------------
+
+def _parse_il_desc(desc):
+    """Extract a short readable status from a full MLB transaction description."""
+    m = re.search(r'(\d+)-day', desc, re.IGNORECASE)
+    il_type = f"{m.group(1)}-day IL" if m else "IL"
+    cond = re.search(r'\bwith\b (.+?)\.?\s*$', desc, re.IGNORECASE)
+    if cond:
+        return f"{il_type} — {cond.group(1).strip().rstrip('.')}"
+    return il_type
+
+
+def get_il_pitchers(days_back=60):
+    """
+    Returns dict mlbam_id (int) → short status string for players currently on the IL.
+    Pulls the MLB transaction log and subtracts anyone who's been activated.
+    """
+    from datetime import timedelta
+    end_date   = date.today()
+    start_date = end_date - timedelta(days=days_back)
+
+    r = requests.get(
+        'https://statsapi.mlb.com/api/v1/transactions',
+        params={
+            'sportId':   1,
+            'startDate': start_date.strftime('%Y-%m-%d'),
+            'endDate':   end_date.strftime('%Y-%m-%d'),
+        },
+        timeout=15,
+    )
+    r.raise_for_status()
+
+    placed  = {}   # mlbam_id → short description
+    removed = set()
+
+    for tx in r.json().get('transactions', []):
+        pid  = (tx.get('person') or {}).get('id')
+        if not pid:
+            continue
+        pid  = int(pid)
+        code = (tx.get('typeCode') or '').upper()
+        desc = tx.get('description', '')
+        desc_lower = desc.lower()
+
+        if 'IL' in code or 'DL' in code or ('injured list' in desc_lower and 'placed' in desc_lower):
+            placed[pid] = _parse_il_desc(desc)
+        elif code in ('ACT', 'DTO') or any(w in desc_lower for w in ('reinstated', 'activated', 'outrighted')):
+            removed.add(pid)
+
+    return {pid: desc for pid, desc in placed.items() if pid not in removed}
+
+
 # -- Scoring projection -------------------------------------------------------
 
 def project_start(row, park_factor=1.0):
@@ -264,6 +316,21 @@ def project_start(row, park_factor=1.0):
 
 
 # -- Discord formatting -------------------------------------------------------
+
+def _injury_section(my_all, all_stats, il_data):
+    """Injury watch: roster pitchers currently on the IL."""
+    if not my_all or all_stats is None or not il_data:
+        return ""
+    id_map = {name: int(pid) for name, pid in zip(all_stats['name'], all_stats['mlbam_id'])}
+    lines = [
+        f"⚠ {name} — {il_data[pid]}"
+        for name in my_all
+        if (pid := id_map.get(name)) and pid in il_data
+    ]
+    if not lines:
+        return ""
+    return "\n**🏥 INJURY WATCH — YOUR ROSTER**\n" + "\n".join(lines)
+
 
 def _breakout_section(all_stats, fa_names):
     """Wire starters whose ERA is inflated vs FIP + xERA with elite K%."""
@@ -311,7 +378,7 @@ def _closer_section(all_stats, fa_names):
 
 
 def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=None, fa_names=None,
-                   draft_date=None, all_stats=None):
+                   draft_date=None, all_stats=None, il_data=None):
     """
     Returns a list of message strings, each under 1900 chars.
 
@@ -415,6 +482,7 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
             section("YOUR STARTERS TODAY", mine_df) +
             section("OPPONENT'S STARTERS TODAY", opp_df) +
             section("WIRE PICKUPS — STARTING TODAY", wire_df) +
+            _injury_section(my_all, all_stats, il_data) +
             _breakout_section(all_stats, fa_names) +
             _closer_section(all_stats, fa_names) +
             f"\n{scoring_legend}" +
@@ -514,11 +582,19 @@ if __name__ == '__main__':
     else:
         print("ESPN env vars not set — using Phase 1 format (all starters, no roster split).")
 
+    print("Pulling IL data...")
+    try:
+        il_data = get_il_pitchers()
+        print(f"  {len(il_data)} players on IL.")
+    except Exception as e:
+        print(f"  WARNING: IL fetch failed ({e}) — skipping injury watch.")
+        il_data = {}
+
     webhook = os.environ.get('DISCORD_WEBHOOK_URL')
     draft_date = os.environ.get('DRAFT_DATE')
     msgs = format_discord(merged, game_date, my_names=my_names, opp_names=opp_names,
                           my_all=my_all, fa_names=fa_names,
-                          draft_date=draft_date, all_stats=stats)
+                          draft_date=draft_date, all_stats=stats, il_data=il_data)
 
     if not webhook:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
