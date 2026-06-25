@@ -30,6 +30,8 @@ from io import StringIO
 import pandas as pd
 import requests
 
+from park_factors import get_park_factor, park_label
+
 # -- Scoring (The Yastrzemski Legacy) -----------------------------------------
 SCORING = {
     'IP':  3.0,
@@ -236,7 +238,7 @@ def get_espn_data(league_id, espn_s2, swid, team_id, season=2025):
 
 # -- Scoring projection -------------------------------------------------------
 
-def project_start(row):
+def project_start(row, park_factor=1.0):
     ip_total = float(row.get('IP', 0) or 0)
     gs       = max(int(row.get('GS', 1) or 1), 1)
     ip_start = min(ip_total / gs, 7.0)
@@ -247,14 +249,16 @@ def project_start(row):
     def rate(col):
         return float(row.get(col, 0) or 0) / ip_total
 
+    # Park factor scales ER and H — the two biggest point-swing stats (-2 and -1).
+    # Walks and IP are not park-dependent.
     return round(
-        ip_start              * SCORING['IP'] +
-        rate('SO') * ip_start * SCORING['SO'] +
-        rate('H')  * ip_start * SCORING['H']  +
-        rate('BB') * ip_start * SCORING['BB'] +
-        rate('ER') * ip_start * SCORING['ER'] +
-        WIN_PROB              * SCORING['W']   +
-        LOSS_PROB             * SCORING['L'],
+        ip_start                           * SCORING['IP'] +
+        rate('SO') * ip_start              * SCORING['SO'] +
+        rate('H')  * ip_start * park_factor * SCORING['H']  +
+        rate('BB') * ip_start              * SCORING['BB'] +
+        rate('ER') * ip_start * park_factor * SCORING['ER'] +
+        WIN_PROB                            * SCORING['W']   +
+        LOSS_PROB                           * SCORING['L'],
         1
     )
 
@@ -331,8 +335,11 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
             pass
 
     df = df.copy()
+    df['park_factor'] = df.apply(get_park_factor, axis=1)
     has_stats = df['IP'].notna()
-    df.loc[has_stats, 'proj_pts'] = df[has_stats].apply(project_start, axis=1)
+    df.loc[has_stats, 'proj_pts'] = df[has_stats].apply(
+        lambda r: project_start(r, park_factor=r['park_factor']), axis=1
+    )
     df = df.sort_values('proj_pts', ascending=False, na_position='last')
 
     scoring_legend = "*IP×+3  K×+1  ER×-2  H×-1  BB×-1  W×+2  L×-2*  🟢≥14  🟡9-13  🔴<9"
@@ -355,16 +362,17 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
             flag = "BUY" if diff > 0.75 else "SEL" if diff < -0.75 else "   "
         else:
             flag = "   "
+        park = park_label(row.get('park_factor', 1.0))
         return (
             f"{icon}{row['name']:<21} {matchup:<13} "
             f"{proj_str:>6}  {fmt(row.get('ERA')):>4}  "
             f"{fmt(row.get('FIP')):>4}  {fmt(row.get('xERA')):>4}  "
-            f"{fmt(row.get('K%'), 1):>5}  {flag}\n"
+            f"{fmt(row.get('K%'), 1):>5}  {flag} {park}\n"
         )
 
     col_header = (
-        f"{'PITCHER':<22} {'MATCHUP':<13} {'PROJ':>6}  {'ERA':>4}  {'FIP':>4}  {'xERA':>4}  {'K%':>5}  FLAG\n"
-        f"{'-'*22} {'-'*13} {'-'*6}  {'-'*4}  {'-'*4}  {'-'*4}  {'-'*5}  ----\n"
+        f"{'PITCHER':<22} {'MATCHUP':<13} {'PROJ':>6}  {'ERA':>4}  {'FIP':>4}  {'xERA':>4}  {'K%':>5}  FLAG PARK\n"
+        f"{'-'*22} {'-'*13} {'-'*6}  {'-'*4}  {'-'*4}  {'-'*4}  {'-'*5}  ---- ----\n"
     )
 
     # ── Phase 2 sectioned layout ──────────────────────────────────────────────
