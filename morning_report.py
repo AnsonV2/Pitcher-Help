@@ -427,8 +427,6 @@ if __name__ == '__main__':
         print(f"  My roster pitchers: {len(my_all)}  |  Opponent pitchers: {len(opp_names)}  |  Free agent pitchers: {len(fa_names)}")
     else:
         print("ESPN env vars not set — using Phase 1 format (all starters, no roster split).")
-        if webhook:
-            requests.post(webhook, json={'content': '⚠ ESPN env vars not set — showing all starters (no roster split).'}, timeout=10)
 
     webhook = os.environ.get('DISCORD_WEBHOOK_URL')
     msgs = format_discord(merged, game_date, my_names=my_names, opp_names=opp_names, my_all=my_all, fa_names=fa_names)
