@@ -80,10 +80,12 @@ def get_season_stats(season=2025, min_ip=20.0):
         w  = int(stat.get('wins', 0) or 0)
         l  = int(stat.get('losses', 0) or 0)
         sv = int(stat.get('saves', 0) or 0)
+        bf = int(stat.get('battersFaced', 0) or 0)
 
-        fip = round((13 * hr + 3 * bb - 2 * so) / ip + FIP_CONSTANT, 2) if ip > 0 else None
-        k9  = round((so / ip) * 9, 1) if ip > 0 else None
-        bb9 = round((bb / ip) * 9, 1) if ip > 0 else None
+        fip  = round((13 * hr + 3 * bb - 2 * so) / ip + FIP_CONSTANT, 2) if ip > 0 else None
+        k9   = round((so / ip) * 9, 1) if ip > 0 else None
+        bb9  = round((bb / ip) * 9, 1) if ip > 0 else None
+        kpct = round((so / bf) * 100, 1) if bf > 0 else None
 
         rows.append({
             'name': person.get('fullName'), 'mlbam_id': person.get('id'),
@@ -91,7 +93,7 @@ def get_season_stats(season=2025, min_ip=20.0):
             'H': h, 'ER': er, 'HR': hr, 'W': w, 'L': l, 'SV': sv,
             'ERA': float(stat.get('era', 0) or 0),
             'WHIP': float(stat.get('whip', 0) or 0),
-            'FIP': fip, 'K9': k9, 'BB9': bb9,
+            'FIP': fip, 'K9': k9, 'BB9': bb9, 'K%': kpct,
         })
 
     return pd.DataFrame(rows)
@@ -109,6 +111,7 @@ def get_savant_stats(season=2025, min_pa=100):
     df = df.rename(columns={'player_id': 'mlbam_id', 'xera': 'xERA'})
     keep = ['mlbam_id', 'xERA']
     return df[[c for c in keep if c in df.columns]]
+
 
 
 def get_team_abbrevs(season=2025):
@@ -258,6 +261,29 @@ def project_start(row):
 
 # -- Discord formatting -------------------------------------------------------
 
+def _breakout_section(all_stats, fa_names):
+    """Wire starters whose ERA is inflated vs FIP + xERA with elite K%."""
+    if all_stats is None or not fa_names:
+        return ""
+    tmp = all_stats.copy()
+    tmp['_norm'] = tmp['name'].apply(_normalize)
+    candidates = tmp[
+        tmp['_norm'].isin(fa_names) &
+        (tmp['GS'] > 0) &
+        (tmp['ERA'] - tmp['FIP'] > 1.0) &
+        tmp['xERA'].notna() & (tmp['xERA'] < 4.00) &
+        tmp['K%'].notna() & (tmp['K%'] >= 23.0)
+    ].sort_values('FIP')
+    if candidates.empty:
+        return ""
+    lines = "".join(
+        f"  {r['name']:<23} ERA:{r['ERA']:.2f}  FIP:{r['FIP']:.2f}"
+        f"  xERA:{r['xERA']:.2f}  K%:{r['K%']:.1f}\n"
+        for _, r in candidates.iterrows()
+    )
+    return f"\n**📈 BREAKOUT CANDIDATES — ON WIRE**\n```\n{lines}```"
+
+
 def _closer_section(all_stats, fa_names):
     """Returns a formatted string for wire closers meeting quality thresholds."""
     if all_stats is None or not fa_names:
@@ -378,6 +404,7 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
             section("YOUR STARTERS TODAY", mine_df) +
             section("OPPONENT'S STARTERS TODAY", opp_df) +
             section("WIRE PICKUPS — STARTING TODAY", wire_df) +
+            _breakout_section(all_stats, fa_names) +
             _closer_section(all_stats, fa_names) +
             f"\n{scoring_legend}" +
             no_data_warn
@@ -441,7 +468,8 @@ if __name__ == '__main__':
         stats  = stats.merge(savant, on='mlbam_id', how='left')
         print(f"  Merged xERA for {stats['xERA'].notna().sum()}/{len(stats)} pitchers.")
     except Exception as e:
-        print(f"  WARNING: Savant fetch failed ({e}) — continuing without xERA.")
+        print(f"  WARNING: Savant xERA fetch failed ({e}) — continuing without xERA.")
+
 
     print(f"Pulling probable starters for {target}...")
     team_abbrevs = get_team_abbrevs(season=season)
