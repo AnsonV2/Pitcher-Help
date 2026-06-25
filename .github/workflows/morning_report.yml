@@ -28,11 +28,15 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install pandas requests
+        run: pip install pandas requests espn-api
 
       - name: Run morning report
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          ESPN_S2:             ${{ secrets.ESPN_S2 }}
+          ESPN_SWID:           ${{ secrets.ESPN_SWID }}
+          ESPN_LEAGUE_ID:      ${{ secrets.ESPN_LEAGUE_ID }}
+          ESPN_TEAM_ID:        ${{ secrets.ESPN_TEAM_ID }}
         run: |
           if [ -n "${{ github.event.inputs.date }}" ]; then
             python morning_report.py "${{ github.event.inputs.date }}"

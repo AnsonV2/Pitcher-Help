@@ -8,8 +8,11 @@ All secrets come from environment variables (GitHub Actions secrets).
 Required env vars:
   DISCORD_WEBHOOK_URL  — copied from Discord channel > Integrations > Webhooks
 
-Optional env vars (Phase 2 — ESPN integration, not yet used):
-  ESPN_S2, ESPN_SWID, ESPN_LEAGUE_ID
+Phase 2 ESPN env vars (optional — enables roster/matchup sections):
+  ESPN_S2          — espn_s2 cookie from browser DevTools
+  ESPN_SWID        — SWID cookie from browser DevTools
+  ESPN_LEAGUE_ID   — numeric league ID from the ESPN fantasy URL
+  ESPN_TEAM_ID     — your team's number in the league (1-10)
 
 Run locally to test Discord formatting:
   set DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
@@ -18,7 +21,9 @@ Run locally to test Discord formatting:
 """
 
 import os
+import re
 import sys
+import unicodedata
 from datetime import date
 from io import StringIO
 
@@ -147,6 +152,79 @@ def get_probables(game_date=None, team_abbrevs=None):
     return starters
 
 
+# -- ESPN Integration (Phase 2) -----------------------------------------------
+
+def _normalize(name):
+    """Lowercase + strip accents + strip Jr/Sr/II suffixes for name matching."""
+    nfd = unicodedata.normalize('NFD', name or '')
+    ascii_name = ''.join(c for c in nfd if unicodedata.category(c) != 'Mn')
+    clean = re.sub(r'\s+(Jr\.?|Sr\.?|II|III|IV)$', '', ascii_name, flags=re.IGNORECASE)
+    return clean.lower().strip()
+
+
+def get_espn_data(league_id, espn_s2, swid, team_id, season=2025):
+    """
+    Connect to ESPN Fantasy and return:
+      my_names   — normalized pitcher names on my roster
+      opp_names  — normalized pitcher names on this week's opponent's roster
+      my_all     — list of raw names for all my roster pitchers (for no-start alert)
+
+    Returns (set(), set(), []) on any ESPN failure so the report still runs.
+    """
+    try:
+        from espn_api.baseball import League
+    except ImportError:
+        print("  WARNING: espn_api not installed — skipping ESPN integration.")
+        return set(), set(), [], set()
+
+    try:
+        league   = League(league_id=int(league_id), year=season, espn_s2=espn_s2, swid=swid)
+        my_team  = next((t for t in league.teams if t.team_id == int(team_id)), None)
+        if my_team is None:
+            print(f"  WARNING: ESPN team ID {team_id} not found — skipping ESPN integration.")
+            return set(), set(), [], set()
+
+        pitcher_slots = {'SP', 'RP', 'P'}
+
+        def _pitchers(team):
+            return [p for p in team.roster if getattr(p, 'position', '') in pitcher_slots]
+
+        my_pitchers = _pitchers(my_team)
+        my_names    = {_normalize(p.name) for p in my_pitchers}
+        my_all      = [p.name for p in my_pitchers]
+
+        opp_names = set()
+        try:
+            period   = league.currentMatchupPeriod
+            matchups = league.box_scores(matchup_period=period)
+            opp_team = None
+            for m in matchups:
+                if getattr(m, 'home_team', None) and m.home_team.team_id == my_team.team_id:
+                    opp_team = m.away_team
+                    break
+                if getattr(m, 'away_team', None) and m.away_team.team_id == my_team.team_id:
+                    opp_team = m.home_team
+                    break
+            if opp_team:
+                opp_names = {_normalize(p.name) for p in _pitchers(opp_team)}
+        except Exception as e:
+            print(f"  WARNING: Could not fetch matchup opponent ({e}).")
+
+        fa_names = set()
+        try:
+            free_agents = league.free_agents(size=200)
+            fa_names = {_normalize(p.name) for p in free_agents
+                        if getattr(p, 'position', '') in pitcher_slots}
+        except Exception as e:
+            print(f"  WARNING: Could not fetch free agents ({e}) — wire section unfiltered.")
+
+        return my_names, opp_names, my_all, fa_names
+
+    except Exception as e:
+        print(f"  WARNING: ESPN fetch failed ({e}) — continuing without roster data.")
+        return set(), set(), [], set()
+
+
 # -- Scoring projection -------------------------------------------------------
 
 def project_start(row):
@@ -174,8 +252,15 @@ def project_start(row):
 
 # -- Discord formatting -------------------------------------------------------
 
-def format_discord(df, game_date=None):
-    """Returns a list of message strings, each under 1900 chars."""
+def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=None, fa_names=None):
+    """
+    Returns a list of message strings, each under 1900 chars.
+
+    When my_names / opp_names are provided (Phase 2 ESPN integration):
+      - Splits into: YOUR STARTERS / OPP STARTERS / WIRE PICKUPS sections
+      - Prepends a no-start alert for your roster pitchers not starting today
+    When omitted: falls back to a single sorted list of all starters.
+    """
     label = date.today().strftime('%A %b %d') if not game_date else game_date
 
     df = df.copy()
@@ -183,12 +268,7 @@ def format_discord(df, game_date=None):
     df.loc[has_stats, 'proj_pts'] = df[has_stats].apply(project_start, axis=1)
     df = df.sort_values('proj_pts', ascending=False, na_position='last')
 
-    col_header = (
-        f"{'PITCHER':<22} {'MATCHUP':<13} {'PROJ':>6}  {'ERA':>4}  {'FIP':>4}  {'xERA':>4}\n"
-        f"{'-'*22} {'-'*13} {'-'*6}  {'-'*4}  {'-'*4}  {'-'*4}\n"
-    )
-    title   = f"⚾ **The Yastrzemski Legacy** — {label}\n```\n{col_header}"
-    footer  = "```\n*IP×+3  K×+1  ER×-2  H×-1  BB×-1  W×+2  L×-2*  🟢≥14  🟡9-13  🔴<9"
+    scoring_legend = "*IP×+3  K×+1  ER×-2  H×-1  BB×-1  W×+2  L×-2*  🟢≥14  🟡9-13  🔴<9"
 
     def fmt(v, d=2):
         return f"{v:.{d}f}" if pd.notna(v) and v == v else "  --"
@@ -207,10 +287,74 @@ def format_discord(df, game_date=None):
             f"{fmt(row.get('FIP')):>4}  {fmt(row.get('xERA')):>4}\n"
         )
 
-    lines   = [row_line(r) for _, r in df.iterrows()]
+    col_header = (
+        f"{'PITCHER':<22} {'MATCHUP':<13} {'PROJ':>6}  {'ERA':>4}  {'FIP':>4}  {'xERA':>4}\n"
+        f"{'-'*22} {'-'*13} {'-'*6}  {'-'*4}  {'-'*4}  {'-'*4}\n"
+    )
+
+    # ── Phase 2 sectioned layout ──────────────────────────────────────────────
+    if my_names is not None:
+        df['_norm'] = df['name'].apply(_normalize)
+
+        mine_df = df[df['_norm'].isin(my_names)]
+        opp_df  = df[df['_norm'].isin(opp_names or set())]
+        not_mine = df[~df['_norm'].isin(my_names | (opp_names or set()))]
+        # If we have confirmed FA data, filter to only available players
+        wire_df = (
+            not_mine[not_mine['_norm'].isin(fa_names)]
+            if fa_names else not_mine
+        )
+
+        # No-start alert: my roster pitchers missing from today's probables
+        starting_norms = set(df['_norm'].tolist())
+        silent = [n for n in (my_all or []) if _normalize(n) not in starting_norms]
+        no_start_line = (
+            f"\n⚠ **No start today:** {', '.join(silent)}" if silent else ""
+        )
+
+        no_data_names = df[df['IP'].isna()]['name'].tolist()
+        no_data_warn  = (
+            f"\n⚠ No season data (rookie/call-up): {', '.join(no_data_names)}"
+            if no_data_names else ""
+        )
+
+        def section(header, rows_df):
+            if rows_df.empty:
+                return f"\n**{header}**\n```\n(none today)\n```"
+            body = "".join(row_line(r) for _, r in rows_df.iterrows())
+            return f"\n**{header}**\n```\n{col_header}{body}```"
+
+        header = f"⚾ **The Yastrzemski Legacy** — {label}{no_start_line}"
+        body   = (
+            section("YOUR STARTERS TODAY", mine_df) +
+            section("OPPONENT'S STARTERS TODAY", opp_df) +
+            section("WIRE PICKUPS — STARTING TODAY", wire_df) +
+            f"\n{scoring_legend}" +
+            no_data_warn
+        )
+
+        # Split into ≤1900-char chunks at section boundaries
+        messages = []
+        chunk    = header
+        for part in body.split("\n**"):
+            if not part:
+                continue
+            segment = "\n**" + part
+            if len(chunk) + len(segment) > 1900:
+                messages.append(chunk)
+                chunk = segment
+            else:
+                chunk += segment
+        messages.append(chunk)
+        return messages
+
+    # ── Phase 1 fallback: single sorted list ──────────────────────────────────
     no_data = df[df['IP'].isna()]['name'].tolist()
     warn    = f"\n⚠ No season data (rookie/call-up): {', '.join(no_data)}" if no_data else ""
+    title   = f"⚾ **The Yastrzemski Legacy** — {label}\n```\n{col_header}"
+    footer  = f"```\n{scoring_legend}"
 
+    lines = [row_line(r) for _, r in df.iterrows()]
     messages, chunk = [], title
     for line in lines:
         if len(chunk) + len(line) + len(footer) + len(warn) > 1900:
@@ -218,7 +362,6 @@ def format_discord(df, game_date=None):
             chunk = "```\n"
         chunk += line
     messages.append(chunk + footer + warn)
-
     return messages
 
 
@@ -263,15 +406,35 @@ if __name__ == '__main__':
     merged  = prob_df.merge(stats, on='mlbam_id', how='left', suffixes=('', '_season'))
     print(f"  Matched {merged['IP'].notna().sum()}/{len(merged)} pitchers to season data.")
 
+    # Phase 2 — ESPN roster integration (uses env vars set in GitHub secrets)
+    my_names = opp_names = my_all = fa_names = None
+    espn_vars = (
+        os.environ.get('ESPN_S2'),
+        os.environ.get('ESPN_SWID'),
+        os.environ.get('ESPN_LEAGUE_ID'),
+        os.environ.get('ESPN_TEAM_ID'),
+    )
+    if all(espn_vars):
+        espn_s2, espn_swid, league_id, team_id = espn_vars
+        print("Pulling ESPN roster, matchup, and free agent data...")
+        my_names, opp_names, my_all, fa_names = get_espn_data(
+            league_id=league_id, espn_s2=espn_s2, swid=espn_swid,
+            team_id=team_id, season=season,
+        )
+        print(f"  My roster pitchers: {len(my_all)}  |  Opponent pitchers: {len(opp_names)}  |  Free agent pitchers: {len(fa_names)}")
+    else:
+        print("ESPN env vars not set — using Phase 1 format (all starters, no roster split).")
+
     webhook = os.environ.get('DISCORD_WEBHOOK_URL')
+    msgs = format_discord(merged, game_date, my_names=my_names, opp_names=opp_names, my_all=my_all, fa_names=fa_names)
+
     if not webhook:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
         print("\nDISCORD_WEBHOOK_URL not set — printing to console instead:\n")
-        for msg in format_discord(merged, game_date):
+        for msg in msgs:
             print(msg)
         sys.exit(0)
 
     print("Posting to Discord...")
-    msgs = format_discord(merged, game_date)
     post_to_discord(msgs, webhook)
     print(f"Done — sent {len(msgs)} message(s).")
