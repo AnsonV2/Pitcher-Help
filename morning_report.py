@@ -92,7 +92,8 @@ def get_season_stats(season=2025, min_ip=20.0):
         team = split.get('team', {})
         rows.append({
             'name': person.get('fullName'), 'mlbam_id': person.get('id'),
-            'team': team.get('abbreviation', ''),
+            'team_id': team.get('id'),  # resolved to abbreviation in __main__
+            'team': '',
             'GS': gs, 'IP': ip, 'SO': so, 'BB': bb,
             'H': h, 'ER': er, 'HR': hr, 'W': w, 'L': l, 'SV': sv,
             'ERA': float(stat.get('era', 0) or 0),
@@ -464,17 +465,19 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
             flag = "BUY" if diff > 0.75 else "SEL" if diff < -0.75 else "   "
         else:
             flag = "   "
-        park = park_label(row.get('park_factor', 1.0))
+        park    = park_label(row.get('park_factor', 1.0))
+        win_pct_val = row.get('win_pct', 0.500)
+        wpct_str = f"{win_pct_val:.3f}" if pd.notna(win_pct_val) else ".500"
         return (
             f"{icon}{row['name']:<21} {matchup:<13} "
             f"{proj_str:>6}  {fmt(row.get('ERA')):>4}  "
             f"{fmt(row.get('FIP')):>4}  {fmt(row.get('xERA')):>4}  "
-            f"{fmt(row.get('K%'), 1):>5}  {flag} {park}\n"
+            f"{fmt(row.get('K%'), 1):>5}  {wpct_str}  {flag} {park}\n"
         )
 
     col_header = (
-        f"{'PITCHER':<22} {'MATCHUP':<13} {'PROJ':>6}  {'ERA':>4}  {'FIP':>4}  {'xERA':>4}  {'K%':>5}  FLAG PARK\n"
-        f"{'-'*22} {'-'*13} {'-'*6}  {'-'*4}  {'-'*4}  {'-'*4}  {'-'*5}  ---- ----\n"
+        f"{'PITCHER':<22} {'MATCHUP':<13} {'PROJ':>6}  {'ERA':>4}  {'FIP':>4}  {'xERA':>4}  {'K%':>5}    W%  FLAG PARK\n"
+        f"{'-'*22} {'-'*13} {'-'*6}  {'-'*4}  {'-'*4}  {'-'*4}  {'-'*5}  ----  ---- ----\n"
     )
 
     # ── Phase 2 sectioned layout ──────────────────────────────────────────────
@@ -569,8 +572,12 @@ if __name__ == '__main__':
 
     season = int(target[:4])
 
+    # team_abbrevs first — needed to resolve team names in stats
+    team_abbrevs = get_team_abbrevs(season=season)
+
     print(f"Pulling SP season stats ({season})...")
     stats = get_season_stats(season=season)
+    stats['team'] = stats['team_id'].map(team_abbrevs).fillna('')
     print(f"  Got {len(stats)} qualified SPs.")
 
     print("Pulling Statcast xERA...")
@@ -581,10 +588,8 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"  WARNING: Savant xERA fetch failed ({e}) — continuing without xERA.")
 
-
     print(f"Pulling probable starters for {target}...")
-    team_abbrevs = get_team_abbrevs(season=season)
-    probables    = get_probables(target, team_abbrevs)
+    probables = get_probables(target, team_abbrevs)
     print(f"  Found {len(probables)} probable starters.")
 
     if not probables:
