@@ -89,8 +89,10 @@ def get_season_stats(season=2025, min_ip=20.0):
         bb9  = round((bb / ip) * 9, 1) if ip > 0 else None
         kpct = round((so / bf) * 100, 1) if bf > 0 else None
 
+        team = split.get('team', {})
         rows.append({
             'name': person.get('fullName'), 'mlbam_id': person.get('id'),
+            'team': team.get('abbreviation', ''),
             'GS': gs, 'IP': ip, 'SO': so, 'BB': bb,
             'H': h, 'ER': er, 'HR': hr, 'W': w, 'L': l, 'SV': sv,
             'ERA': float(stat.get('era', 0) or 0),
@@ -124,6 +126,24 @@ def get_team_abbrevs(season=2025):
     )
     r.raise_for_status()
     return {t['id']: t.get('abbreviation', t['name']) for t in r.json().get('teams', [])}
+
+
+def get_team_win_pcts(season=2025):
+    """Returns dict team_abbrev → win% (float) for all MLB teams from current standings."""
+    r = requests.get(
+        'https://statsapi.mlb.com/api/v1/standings',
+        params={'leagueId': '103,104', 'season': season},
+        timeout=10,
+    )
+    r.raise_for_status()
+    result = {}
+    for record in r.json().get('records', []):
+        for tr in record.get('teamRecords', []):
+            abbrev = tr.get('team', {}).get('abbreviation', '')
+            pct    = float(tr.get('winningPercentage', 0.500) or 0.500)
+            if abbrev:
+                result[abbrev] = pct
+    return result
 
 
 def get_probables(game_date=None, team_abbrevs=None):
@@ -290,7 +310,7 @@ def get_il_pitchers(days_back=60):
 
 # -- Scoring projection -------------------------------------------------------
 
-def project_start(row, park_factor=1.0):
+def project_start(row, park_factor=1.0, win_pct=0.500):
     ip_total = float(row.get('IP', 0) or 0)
     gs       = max(int(row.get('GS', 1) or 1), 1)
     ip_start = min(ip_total / gs, 7.0)
@@ -301,16 +321,20 @@ def project_start(row, park_factor=1.0):
     def rate(col):
         return float(row.get(col, 0) or 0) / ip_total
 
+    # Scale W/L probability by team win% relative to .500 baseline.
+    # A .600 team gets 20% more win probability; a .400 team gets 20% less.
+    w_prob = WIN_PROB  * (win_pct / 0.500)
+    l_prob = LOSS_PROB * ((1.0 - win_pct) / 0.500)
+
     # Park factor scales ER and H — the two biggest point-swing stats (-2 and -1).
-    # Walks and IP are not park-dependent.
     return round(
-        ip_start                           * SCORING['IP'] +
-        rate('SO') * ip_start              * SCORING['SO'] +
+        ip_start                            * SCORING['IP'] +
+        rate('SO') * ip_start               * SCORING['SO'] +
         rate('H')  * ip_start * park_factor * SCORING['H']  +
-        rate('BB') * ip_start              * SCORING['BB'] +
+        rate('BB') * ip_start               * SCORING['BB'] +
         rate('ER') * ip_start * park_factor * SCORING['ER'] +
-        WIN_PROB                            * SCORING['W']   +
-        LOSS_PROB                           * SCORING['L'],
+        w_prob                              * SCORING['W']   +
+        l_prob                              * SCORING['L'],
         1
     )
 
@@ -355,8 +379,9 @@ def _breakout_section(all_stats, fa_names):
     return f"\n**📈 BREAKOUT CANDIDATES — ON WIRE**\n```\n{lines}```"
 
 
-def _closer_section(all_stats, fa_names):
-    """Returns a formatted string for wire closers meeting quality thresholds."""
+def _closer_section(all_stats, fa_names, win_pcts=None):
+    """Returns a formatted string for wire closers meeting quality thresholds.
+    Requires winning team (win% > .500) per the closer filter spec."""
     if all_stats is None or not fa_names:
         return ""
     tmp = all_stats.copy()
@@ -367,10 +392,16 @@ def _closer_section(all_stats, fa_names):
         (tmp['SV'] >= 8) &
         (tmp['ERA'] <= 3.50) &
         (tmp['FIP'] <= 3.50)
-    ].sort_values('SV', ascending=False)
+    ]
+    if win_pcts and 'team' in closers.columns:
+        closers = closers[closers['team'].map(lambda t: win_pcts.get(t, 0.500) > 0.500)]
+    closers = closers.sort_values('SV', ascending=False)
     if closers.empty:
         return ""
     lines = "".join(
+        f"🔒 {r['name']:<23} SV:{int(r['SV']):>2}  ERA:{r['ERA']:.2f}  FIP:{r['FIP']:.2f}"
+        f"  W%:{win_pcts.get(r.get('team',''), 0.500):.3f}\n"
+        if win_pcts else
         f"🔒 {r['name']:<23} SV:{int(r['SV']):>2}  ERA:{r['ERA']:.2f}  FIP:{r['FIP']:.2f}\n"
         for _, r in closers.iterrows()
     )
@@ -378,7 +409,7 @@ def _closer_section(all_stats, fa_names):
 
 
 def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=None, fa_names=None,
-                   draft_date=None, all_stats=None, il_data=None):
+                   draft_date=None, all_stats=None, il_data=None, win_pcts=None):
     """
     Returns a list of message strings, each under 1900 chars.
 
@@ -403,9 +434,10 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
 
     df = df.copy()
     df['park_factor'] = df.apply(get_park_factor, axis=1)
+    df['win_pct'] = df['team'].map(lambda t: (win_pcts or {}).get(t, 0.500))
     has_stats = df['IP'].notna()
     df.loc[has_stats, 'proj_pts'] = df[has_stats].apply(
-        lambda r: project_start(r, park_factor=r['park_factor']), axis=1
+        lambda r: project_start(r, park_factor=r['park_factor'], win_pct=r['win_pct']), axis=1
     )
     df = df.sort_values('proj_pts', ascending=False, na_position='last')
 
@@ -484,7 +516,7 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
             section("WIRE PICKUPS — STARTING TODAY", wire_df) +
             _injury_section(my_all, all_stats, il_data) +
             _breakout_section(all_stats, fa_names) +
-            _closer_section(all_stats, fa_names) +
+            _closer_section(all_stats, fa_names, win_pcts=win_pcts) +
             f"\n{scoring_legend}" +
             no_data_warn
         )
@@ -590,11 +622,20 @@ if __name__ == '__main__':
         print(f"  WARNING: IL fetch failed ({e}) — skipping injury watch.")
         il_data = {}
 
+    print("Pulling team standings (win%)...")
+    try:
+        win_pcts = get_team_win_pcts(season=season)
+        print(f"  Got win% for {len(win_pcts)} teams.")
+    except Exception as e:
+        print(f"  WARNING: Standings fetch failed ({e}) — using flat win probability.")
+        win_pcts = {}
+
     webhook = os.environ.get('DISCORD_WEBHOOK_URL')
     draft_date = os.environ.get('DRAFT_DATE')
     msgs = format_discord(merged, game_date, my_names=my_names, opp_names=opp_names,
                           my_all=my_all, fa_names=fa_names,
-                          draft_date=draft_date, all_stats=stats, il_data=il_data)
+                          draft_date=draft_date, all_stats=stats, il_data=il_data,
+                          win_pcts=win_pcts)
 
     if not webhook:
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
