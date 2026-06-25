@@ -184,10 +184,13 @@ def get_espn_data(league_id, espn_s2, swid, team_id, season=2025):
             print(f"  WARNING: ESPN team ID {team_id} not found — skipping ESPN integration.")
             return set(), set(), [], set()
 
-        pitcher_slots = {'SP', 'RP', 'P'}
+        # espn_api may return 'SP', 'RP', 'P', or 'pitcher' depending on version
+        pitcher_slots = {'SP', 'RP', 'P', 'pitcher'}
 
         def _pitchers(team):
-            return [p for p in team.roster if getattr(p, 'position', '') in pitcher_slots]
+            return [p for p in team.roster
+                    if getattr(p, 'position', '').upper() in {'SP', 'RP', 'P', 'PITCHER'}
+                    or 'P' in getattr(p, 'eligibleSlots', [])]
 
         my_pitchers = _pitchers(my_team)
         my_names    = {_normalize(p.name) for p in my_pitchers}
@@ -424,6 +427,8 @@ if __name__ == '__main__':
         print(f"  My roster pitchers: {len(my_all)}  |  Opponent pitchers: {len(opp_names)}  |  Free agent pitchers: {len(fa_names)}")
     else:
         print("ESPN env vars not set — using Phase 1 format (all starters, no roster split).")
+        if webhook:
+            requests.post(webhook, json={'content': '⚠ ESPN env vars not set — showing all starters (no roster split).'}, timeout=10)
 
     webhook = os.environ.get('DISCORD_WEBHOOK_URL')
     msgs = format_discord(merged, game_date, my_names=my_names, opp_names=opp_names, my_all=my_all, fa_names=fa_names)
