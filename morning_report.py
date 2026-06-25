@@ -129,8 +129,9 @@ def get_team_abbrevs(season=2025):
     return {t['id']: t.get('abbreviation', t['name']) for t in r.json().get('teams', [])}
 
 
-def get_team_win_pcts(season=2025):
-    """Returns dict team_abbrev → win% (float) for all MLB teams from current standings."""
+def get_team_win_pcts(season=2025, team_abbrevs=None):
+    """Returns dict team_abbrev → win% (float) for all MLB teams from current standings.
+    Requires team_abbrevs (team_id → abbrev) because the standings API omits abbreviation."""
     r = requests.get(
         'https://statsapi.mlb.com/api/v1/standings',
         params={'leagueId': '103,104', 'season': season},
@@ -140,8 +141,9 @@ def get_team_win_pcts(season=2025):
     result = {}
     for record in r.json().get('records', []):
         for tr in record.get('teamRecords', []):
-            abbrev = tr.get('team', {}).get('abbreviation', '')
-            pct    = float(tr.get('winningPercentage', 0.500) or 0.500)
+            team_id = tr.get('team', {}).get('id')
+            abbrev  = (team_abbrevs or {}).get(team_id, '')
+            pct     = float(tr.get('winningPercentage', 0.500) or 0.500)
             if abbrev:
                 result[abbrev] = pct
     return result
@@ -629,7 +631,7 @@ if __name__ == '__main__':
 
     print("Pulling team standings (win%)...")
     try:
-        win_pcts = get_team_win_pcts(season=season)
+        win_pcts = get_team_win_pcts(season=season, team_abbrevs=team_abbrevs)
         print(f"  Got win% for {len(win_pcts)} teams.")
     except Exception as e:
         print(f"  WARNING: Standings fetch failed ({e}) — using flat win probability.")
