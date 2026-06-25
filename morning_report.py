@@ -342,7 +342,10 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
     )
     df = df.sort_values('proj_pts', ascending=False, na_position='last')
 
-    scoring_legend = "*IP×+3  K×+1  ER×-2  H×-1  BB×-1  W×+2  L×-2*  🟢≥14  🟡9-13  🔴<9"
+    scoring_legend = (
+        "*IP×+3  K×+1  ER×-2  H×-1  BB×-1  W×+2  L×-2*  🟢≥14  🟡9-13  🔴<9\n"
+        "*PARK: COO=Coors  ++=hitter(1.04+)  +=mild hitter  --=pitcher(≤0.95)  -=mild pitcher*"
+    )
 
     def fmt(v, d=2):
         return f"{v:.{d}f}" if pd.notna(v) and v == v else "  --"
