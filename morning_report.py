@@ -359,12 +359,12 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
             f"{icon}{row['name']:<21} {matchup:<13} "
             f"{proj_str:>6}  {fmt(row.get('ERA')):>4}  "
             f"{fmt(row.get('FIP')):>4}  {fmt(row.get('xERA')):>4}  "
-            f"{fmt(row.get('K9'), 1):>4}  {flag}\n"
+            f"{fmt(row.get('K%'), 1):>5}  {flag}\n"
         )
 
     col_header = (
-        f"{'PITCHER':<22} {'MATCHUP':<13} {'PROJ':>6}  {'ERA':>4}  {'FIP':>4}  {'xERA':>4}  {'K/9':>4}  FLAG\n"
-        f"{'-'*22} {'-'*13} {'-'*6}  {'-'*4}  {'-'*4}  {'-'*4}  {'-'*4}  ----\n"
+        f"{'PITCHER':<22} {'MATCHUP':<13} {'PROJ':>6}  {'ERA':>4}  {'FIP':>4}  {'xERA':>4}  {'K%':>5}  FLAG\n"
+        f"{'-'*22} {'-'*13} {'-'*6}  {'-'*4}  {'-'*4}  {'-'*4}  {'-'*5}  ----\n"
     )
 
     # ── Phase 2 sectioned layout ──────────────────────────────────────────────
