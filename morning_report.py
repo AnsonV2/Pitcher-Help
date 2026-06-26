@@ -651,6 +651,10 @@ if __name__ == '__main__':
 
     print(f"Pulling SP season stats ({season})...")
     stats = get_season_stats(season=season)
+    if stats.empty or 'team_id' not in stats.columns:
+        # Preseason: the season hasn't started, so there are no stats to score.
+        print("No season stats yet (preseason) — nothing to post.")
+        sys.exit(0)
     stats['team'] = stats['team_id'].map(team_abbrevs).fillna('')
     print(f"  Got {len(stats)} qualified SPs.")
 

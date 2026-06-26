@@ -48,7 +48,10 @@ def project_two_start_pitchers(week_start, week_end, team_abbrevs):
 
     Reconstructs each team's rotation from recent actual starts, then fills
     unannounced upcoming games via a least-recently-used (most-rested) cycle.
-    Returns dict mlbam_id -> {name, team, starts:[{date,opponent,home,projected}], count}.
+    Returns (results, week_game_slots) where results is
+      dict mlbam_id -> {name, team, starts:[{date,opponent,home,projected}], count}
+    and week_game_slots is the number of game slots scheduled in the week window
+    (0 ⇒ no MLB games next week, i.e. off-season — caller should not post).
     """
     lookback = week_start - timedelta(days=12)
     r = requests.get(
@@ -112,7 +115,11 @@ def project_two_start_pitchers(week_start, week_end, team_abbrevs):
                                       'home': s['home'], 'projected': projected})
                 rec['count'] += 1
 
-    return results
+    week_game_slots = sum(
+        1 for games in team_games.values()
+        for s in games if week_start <= s['date'] <= week_end
+    )
+    return results, week_game_slots
 
 
 def _score_week(rec, srow, win_pcts, opp_factors):
@@ -232,8 +239,22 @@ if __name__ == '__main__':
 
     team_abbrevs = get_team_abbrevs(season=season)
 
+    print("Projecting 2-start pitchers...")
+    two_start, week_game_slots = project_two_start_pitchers(week_start, week_end, team_abbrevs)
+    if week_game_slots == 0:
+        # No MLB games scheduled next week → off-season. Stay silent rather than
+        # posting an empty sweep every Sunday for ~6 months.
+        print("No MLB games scheduled next week (off-season) — nothing to post.")
+        sys.exit(0)
+    print(f"  {sum(1 for r in two_start.values() if r['count'] >= 2)} pitchers projected for 2+ starts.")
+
     print("Pulling SP season stats...")
     stats = get_season_stats(season=season)
+    if stats.empty or 'team_id' not in stats.columns:
+        # Games scheduled but no season stats yet (preseason/spring training) —
+        # can't score anyone, so skip without crashing.
+        print("No season stats yet (preseason) — nothing to post.")
+        sys.exit(0)
     stats['team'] = stats['team_id'].map(team_abbrevs).fillna('')
     print(f"  {len(stats)} qualified pitchers.")
 
@@ -243,11 +264,8 @@ if __name__ == '__main__':
         stats = stats.merge(savant, on='mlbam_id', how='left')
     except Exception as e:
         print(f"  WARNING: xERA fetch failed ({e}).")
+    if 'xERA' not in stats.columns:
         stats['xERA'] = pd.NA
-
-    print("Projecting 2-start pitchers...")
-    two_start = project_two_start_pitchers(week_start, week_end, team_abbrevs)
-    print(f"  {sum(1 for r in two_start.values() if r['count'] >= 2)} pitchers projected for 2+ starts.")
 
     fa_names = None
     espn_vars = (os.environ.get('ESPN_S2'), os.environ.get('ESPN_SWID'),
