@@ -8,7 +8,7 @@ on:
     - cron: '0 14 * * *'
     # Redundancy: run again 5 min later in case first one is skipped
     - cron: '5 14 * * *'
-    # Sunday 9 PM PDT (04:00 UTC Monday) — weekly sweep
+    # Sunday 9 PM PDT (04:00 UTC Monday) — weekly 2-start wire sweep
     - cron: '0 4 * * 1'
     # Redundancy: run again 5 min later
     - cron: '5 4 * * 1'
@@ -17,6 +17,12 @@ on:
       date:
         description: 'Date to run for (YYYY-MM-DD). Leave blank for today.'
         required: false
+      report:
+        description: 'Which report to run: daily or sunday'
+        required: false
+        default: daily
+        type: choice
+        options: [daily, sunday]
 
 jobs:
   morning-report:
@@ -34,7 +40,7 @@ jobs:
       - name: Install dependencies
         run: pip install pandas requests espn-api
 
-      - name: Run morning report
+      - name: Run report
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           ESPN_S2:             ${{ secrets.ESPN_S2 }}
@@ -42,9 +48,15 @@ jobs:
           ESPN_LEAGUE_ID:      ${{ secrets.ESPN_LEAGUE_ID }}
           ESPN_TEAM_ID:        ${{ secrets.ESPN_TEAM_ID }}
           DRAFT_DATE:          ${{ vars.DRAFT_DATE }}
+        # The Sunday-night cron (04:00 UTC Monday) runs the 2-start wire sweep;
+        # all other schedules run the daily morning report. A manual dispatch can
+        # force either via the `report` input.
         run: |
-          if [ -n "${{ github.event.inputs.date }}" ]; then
-            python morning_report.py "${{ github.event.inputs.date }}"
+          SCHEDULE='${{ github.event.schedule }}'
+          REPORT='${{ github.event.inputs.report }}'
+          DATE='${{ github.event.inputs.date }}'
+          if [ "$REPORT" = "sunday" ] || [ "$SCHEDULE" = "0 4 * * 1" ] || [ "$SCHEDULE" = "5 4 * * 1" ]; then
+            python sunday_sweep.py ${DATE:+"$DATE"}
           else
-            python morning_report.py
+            python morning_report.py ${DATE:+"$DATE"}
           fi
