@@ -24,8 +24,13 @@ import os
 import re
 import sys
 import unicodedata
-from datetime import date
+from datetime import date, datetime, timezone
 from io import StringIO
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None
 
 import pandas as pd
 import requests
@@ -232,21 +237,23 @@ def get_espn_data(league_id, espn_s2, swid, team_id, season=2025):
       my_names   — normalized pitcher names on my roster
       opp_names  — normalized pitcher names on this week's opponent's roster
       my_all     — list of raw names for all my roster pitchers (for no-start alert)
+      fa_names   — normalized names of available free agent pitchers
+      espn_ok    — True if auth succeeded, False if cookies are expired/invalid
 
-    Returns (set(), set(), []) on any ESPN failure so the report still runs.
+    Returns (set(), set(), [], set(), False) on any ESPN failure so the report still runs.
     """
     try:
         from espn_api.baseball import League
     except ImportError:
         print("  WARNING: espn_api not installed — skipping ESPN integration.")
-        return set(), set(), [], set()
+        return set(), set(), [], set(), False
 
     try:
         league   = League(league_id=int(league_id), year=season, espn_s2=espn_s2, swid=swid)
         my_team  = next((t for t in league.teams if t.team_id == int(team_id)), None)
         if my_team is None:
             print(f"  WARNING: ESPN team ID {team_id} not found — skipping ESPN integration.")
-            return set(), set(), [], set()
+            return set(), set(), [], set(), False
 
         # espn_api may return 'SP', 'RP', 'P', or 'pitcher' depending on version
         pitcher_slots = {'SP', 'RP', 'P', 'pitcher'}
@@ -285,11 +292,11 @@ def get_espn_data(league_id, espn_s2, swid, team_id, season=2025):
         except Exception as e:
             print(f"  WARNING: Could not fetch free agents ({e}) — wire section unfiltered.")
 
-        return my_names, opp_names, my_all, fa_names
+        return my_names, opp_names, my_all, fa_names, True
 
     except Exception as e:
         print(f"  WARNING: ESPN fetch failed ({e}) — continuing without roster data.")
-        return set(), set(), [], set()
+        return set(), set(), [], set(), False
 
 
 # -- Injury / IL data ---------------------------------------------------------
@@ -471,6 +478,20 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
     """
     label = date.today().strftime('%A %b %d') if not game_date else game_date
 
+    # When the report was generated, in Pacific time (handles PST/PDT).
+    # Falls back to UTC if the tz database isn't available.
+    if ZoneInfo is not None:
+        try:
+            now_pt  = datetime.now(ZoneInfo('America/Los_Angeles'))
+            tz_abbr = now_pt.tzname()
+        except Exception:
+            now_pt, tz_abbr = datetime.now(timezone.utc), 'UTC'
+    else:
+        now_pt, tz_abbr = datetime.now(timezone.utc), 'UTC'
+    hour12      = now_pt.hour % 12 or 12
+    ampm        = 'AM' if now_pt.hour < 12 else 'PM'
+    posted_line = f"\n🕒 Posted {now_pt:%a %b %d} · {hour12}:{now_pt:%M} {ampm} {tz_abbr}"
+
     countdown = ""
     if draft_date:
         try:
@@ -566,7 +587,7 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
             body = "".join(row_line(r) for _, r in rows_df.iterrows())
             return f"\n**{header}**\n```\n{col_header}{body}```"
 
-        header = f"⚾ **The Yastrzemski Legacy** — {label}{countdown}{no_start_line}"
+        header = f"⚾ **The Yastrzemski Legacy** — {label}{countdown}{posted_line}{no_start_line}"
         body   = (
             section("YOUR STARTERS TODAY", mine_df) +
             section("OPPONENT'S STARTERS TODAY", opp_df) +
@@ -596,7 +617,7 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
     # ── Phase 1 fallback: single sorted list ──────────────────────────────────
     no_data = df[df['IP'].isna()]['name'].tolist()
     warn    = f"\n⚠ No season data (rookie/call-up): {', '.join(no_data)}" if no_data else ""
-    title   = f"⚾ **The Yastrzemski Legacy** — {label}{countdown}\n```\n{col_header}"
+    title   = f"⚾ **The Yastrzemski Legacy** — {label}{countdown}{posted_line}\n```\n{col_header}"
     footer  = f"```\n{scoring_legend}"
 
     lines = [row_line(r) for _, r in df.iterrows()]
@@ -665,11 +686,29 @@ if __name__ == '__main__':
     if all(espn_vars):
         espn_s2, espn_swid, league_id, team_id = espn_vars
         print("Pulling ESPN roster, matchup, and free agent data...")
-        my_names, opp_names, my_all, fa_names = get_espn_data(
+        my_names, opp_names, my_all, fa_names, espn_ok = get_espn_data(
             league_id=league_id, espn_s2=espn_s2, swid=espn_swid,
             team_id=team_id, season=season,
         )
-        print(f"  My roster pitchers: {len(my_all)}  |  Opponent pitchers: {len(opp_names)}  |  Free agent pitchers: {len(fa_names)}")
+        if espn_ok:
+            print(f"  My roster pitchers: {len(my_all)}  |  Opponent pitchers: {len(opp_names)}  |  Free agent pitchers: {len(fa_names)}")
+        else:
+            print("  ESPN auth failed — sending Discord alert.")
+            alert_webhook = os.environ.get('DISCORD_WEBHOOK_URL')
+            if alert_webhook:
+                alert = (
+                    "🚨 **ESPN Auth Failed — Action Required**\n"
+                    "Your ESPN cookies have expired. Today's report ran without roster/matchup data.\n\n"
+                    "**To fix:**\n"
+                    "1. Log into ESPN Fantasy in your browser\n"
+                    "2. Open DevTools (F12) → Application → Cookies → `fantasy.espn.com`\n"
+                    "3. Copy the values of `espn_s2` and `SWID`\n"
+                    "4. Go to your GitHub repo → Settings → Secrets → update `ESPN_S2` and `ESPN_SWID`"
+                )
+                try:
+                    requests.post(alert_webhook, json={'content': alert}, timeout=10).raise_for_status()
+                except Exception as e:
+                    print(f"  WARNING: Could not send Discord alert ({e}).")
     else:
         print("ESPN env vars not set — using Phase 1 format (all starters, no roster split).")
 

@@ -2,10 +2,12 @@ name: Morning Report
 
 on:
   schedule:
-    # Daily 8 AM PDT (15:00 UTC) — runs during the season Apr–Oct
-    - cron: '0 15 * * *'
+    # Daily 7 AM PDT (14:00 UTC). Targets 7 AM but GitHub's cron is best-effort
+    # and tends to fire ~1-2h late, so the report typically lands ~8-9 AM.
+    # Early/late is fine — the post itself is timestamped (see morning_report.py).
+    - cron: '0 14 * * *'
     # Redundancy: run again 5 min later in case first one is skipped
-    - cron: '5 15 * * *'
+    - cron: '5 14 * * *'
     # Sunday 9 PM PDT (04:00 UTC Monday) — weekly sweep
     - cron: '0 4 * * 1'
     # Redundancy: run again 5 min later
