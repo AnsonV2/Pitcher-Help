@@ -279,6 +279,12 @@ if __name__ == '__main__':
         if not espn_ok:
             fa_names = None
             print("  ESPN auth failed — wire filter disabled.")
+        elif not fa_names:
+            # Auth OK but the free-agent list came back empty — that's a transient
+            # ESPN error, not a genuinely empty wire. Disable the filter (show all)
+            # instead of posting a misleading "no pitchers" sweep.
+            fa_names = None
+            print("  No free agents returned — wire filter disabled (showing all).")
         else:
             print(f"  {len(fa_names)} free agent pitchers.")
     else:
