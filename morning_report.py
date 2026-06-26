@@ -638,6 +638,26 @@ def post_to_discord(messages, webhook_url):
         r.raise_for_status()
 
 
+def send_espn_auth_alert(webhook_url, context="report"):
+    """POST a Discord alert telling the user their ESPN cookies expired.
+    `context` describes which report ran without roster data. No-op if no webhook."""
+    if not webhook_url:
+        return
+    alert = (
+        "🚨 **ESPN Auth Failed — Action Required**\n"
+        f"Your ESPN cookies have expired. Today's {context} ran without roster/wire data.\n\n"
+        "**To fix:**\n"
+        "1. Log into ESPN Fantasy in your browser\n"
+        "2. Open DevTools (F12) → Application → Cookies → `fantasy.espn.com`\n"
+        "3. Copy the values of `espn_s2` and `SWID`\n"
+        "4. Go to your GitHub repo → Settings → Secrets → update `ESPN_S2` and `ESPN_SWID`"
+    )
+    try:
+        requests.post(webhook_url, json={'content': alert}, timeout=10).raise_for_status()
+    except Exception as e:
+        print(f"  WARNING: Could not send Discord alert ({e}).")
+
+
 # -- Main ---------------------------------------------------------------------
 
 if __name__ == '__main__':
@@ -697,21 +717,7 @@ if __name__ == '__main__':
             print(f"  My roster pitchers: {len(my_all)}  |  Opponent pitchers: {len(opp_names)}  |  Free agent pitchers: {len(fa_names)}")
         else:
             print("  ESPN auth failed — sending Discord alert.")
-            alert_webhook = os.environ.get('DISCORD_WEBHOOK_URL')
-            if alert_webhook:
-                alert = (
-                    "🚨 **ESPN Auth Failed — Action Required**\n"
-                    "Your ESPN cookies have expired. Today's report ran without roster/matchup data.\n\n"
-                    "**To fix:**\n"
-                    "1. Log into ESPN Fantasy in your browser\n"
-                    "2. Open DevTools (F12) → Application → Cookies → `fantasy.espn.com`\n"
-                    "3. Copy the values of `espn_s2` and `SWID`\n"
-                    "4. Go to your GitHub repo → Settings → Secrets → update `ESPN_S2` and `ESPN_SWID`"
-                )
-                try:
-                    requests.post(alert_webhook, json={'content': alert}, timeout=10).raise_for_status()
-                except Exception as e:
-                    print(f"  WARNING: Could not send Discord alert ({e}).")
+            send_espn_auth_alert(os.environ.get('DISCORD_WEBHOOK_URL'), context="morning report")
     else:
         print("ESPN env vars not set — using Phase 1 format (all starters, no roster split).")
 

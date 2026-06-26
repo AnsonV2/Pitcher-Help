@@ -40,6 +40,7 @@ from morning_report import (
     get_team_abbrevs, get_season_stats, get_savant_stats,
     get_team_win_pcts, get_team_batting_stats,
     get_espn_data, project_start, _normalize, post_to_discord,
+    send_espn_auth_alert,
 )
 
 
@@ -278,7 +279,8 @@ if __name__ == '__main__':
         )
         if not espn_ok:
             fa_names = None
-            print("  ESPN auth failed — wire filter disabled.")
+            print("  ESPN auth failed — wire filter disabled, sending Discord alert.")
+            send_espn_auth_alert(os.environ.get('DISCORD_WEBHOOK_URL'), context="Sunday sweep")
         elif not fa_names:
             # Auth OK but the free-agent list came back empty — that's a transient
             # ESPN error, not a genuinely empty wire. Disable the filter (show all)
