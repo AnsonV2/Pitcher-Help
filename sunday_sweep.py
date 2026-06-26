@@ -40,7 +40,7 @@ from morning_report import (
     get_team_abbrevs, get_season_stats, get_savant_stats,
     get_team_win_pcts, get_team_batting_stats,
     get_espn_data, project_start, _normalize, post_to_discord,
-    send_espn_auth_alert,
+    send_espn_auth_alert, send_crash_alert,
 )
 
 
@@ -223,7 +223,7 @@ def _week_window(ref):
     return week_start, week_start + timedelta(days=6)
 
 
-if __name__ == '__main__':
+def main():
     if ZoneInfo is not None:
         try:
             today_pt = datetime.now(ZoneInfo('America/Los_Angeles')).date()
@@ -318,3 +318,12 @@ if __name__ == '__main__':
     print("Posting to Discord...")
     post_to_discord(msgs, webhook)
     print(f"Done — sent {len(msgs)} message(s).")
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as e:
+        # Alert on Discord, then re-raise so the Actions run still fails (red ❌).
+        send_crash_alert(os.environ.get('DISCORD_WEBHOOK_URL'), "Sunday sweep", e)
+        raise

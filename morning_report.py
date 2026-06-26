@@ -658,9 +658,32 @@ def send_espn_auth_alert(webhook_url, context="report"):
         print(f"  WARNING: Could not send Discord alert ({e}).")
 
 
+def send_crash_alert(webhook_url, context, exc):
+    """POST a Discord alert when a run crashes on an uncaught exception.
+    Truncates the error to keep the message well under Discord's 2000-char limit.
+    No-op if no webhook. Never raises — a failed alert must not mask the original crash."""
+    if not webhook_url:
+        return
+    err = f"{type(exc).__name__}: {exc}"
+    if len(err) > 500:
+        err = err[:500] + "…"
+    alert = (
+        f"🛑 **{context} CRASHED — No Report Today**\n"
+        "An uncaught error stopped the run before it could post. Most likely an "
+        "upstream data source (MLB Stats API or the Discord webhook) was down or changed.\n\n"
+        f"```\n{err}\n```\n"
+        "Check the GitHub Actions log (**Actions → Morning Report → latest run**) for the "
+        "full traceback. If it's a transient API outage, the next scheduled run usually recovers."
+    )
+    try:
+        requests.post(webhook_url, json={'content': alert}, timeout=10).raise_for_status()
+    except Exception as e:
+        print(f"  WARNING: Could not send crash alert ({e}).")
+
+
 # -- Main ---------------------------------------------------------------------
 
-if __name__ == '__main__':
+def main():
     game_date = sys.argv[1] if len(sys.argv) > 1 else None
     target    = game_date or date.today().strftime('%Y-%m-%d')
 
@@ -762,3 +785,12 @@ if __name__ == '__main__':
     print("Posting to Discord...")
     post_to_discord(msgs, webhook)
     print(f"Done — sent {len(msgs)} message(s).")
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as e:
+        # Alert on Discord, then re-raise so the Actions run still fails (red ❌).
+        send_crash_alert(os.environ.get('DISCORD_WEBHOOK_URL'), "Morning report", e)
+        raise
