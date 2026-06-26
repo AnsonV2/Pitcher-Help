@@ -552,7 +552,6 @@ def format_discord(df, game_date=None, my_names=None, opp_names=None, my_all=Non
 
     col_header = (
         f"{'PITCHER':<22} {'MATCHUP':<13} {'PROJ':>6}  {'ERA':>4}  {'FIP':>4}  {'xERA':>4}  {'K%':>5}    W%  FLAG PARK OPP\n"
-        f"{'-'*22} {'-'*13} {'-'*6}  {'-'*4}  {'-'*4}  {'-'*4}  {'-'*5}  ----  ---- ---- ---\n"
     )
 
     # ── Phase 2 sectioned layout ──────────────────────────────────────────────
